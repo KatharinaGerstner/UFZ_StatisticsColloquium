@@ -1,0 +1,247 @@
+<style>
+  .small-code pre code {
+    font-size: 1em;
+  }
+</style>
+
+Speeding up computation with R
+========================================================  
+author: Felix May, Katharina Gerstner
+date: 22 March 2016
+transition: none
+width: 1000
+height: 700
+
+UFZ Statistics Colloquium  
+![](C:/Users/hoppek/Pictures/HIGRADE_LOGO.jpg)
+
+
+Content Overview
+========================================================  
+incremental: true
+
+Visser et al. (2015) Speeding Up Ecological and Evolutionary Computations in R; Essentials of High Performance Computing for Biologists. PLOS Comput Biol
+
+- Introduction: Why to optimize?
+- When to optimize?
+- What to optimize?
+- How to optimize? 
+  1. Simple rules to consider while writing the code 
+  2. More sophisticated methods for code optimization such as outsourcing code into low-level language C++
+
+
+Introduction: Why to optimize?
+========================================================
+- Ecological and environmental research is becoming more quantitative and computationally demanding
+- Inefficient computation limits the scope and quality of research
+
+
+When and what to optimize I
+========================================================
+incremental: true
+**Best coding practices**
+  1. Start writing correct code, easy to debug in R, don't worry about efficiency
+  2. Profile your program if it is too slow and guesstimate expected gains (e.g. using R-functions `base::Rprof()`, `aprof::aprof()`)
+  3. Consider optimization only if it is worthwile:
+    1. pure R solution
+    2. Parallelisation
+    3. Rewrite certain key parts in low-level language, e.g. C++
+
+
+When and what to optimize II
+========================================================
+incremental: true
+- Consider optimization only after the code works correctly and produces trustworthy result
+- Check if results are in agreement after each change in the code using `identical()`
+- Trade-off between speed and simplicity, however knowing some general rules help to speed up your code when writing
+- Optimization is time consuming and only turned out to be useful when result in a rather large decrease in run time, optimize code sections which consume large amounts of run time, identifying these code sections allows effective and targeted optimization
+
+
+How fast is my code?
+========================================================
+incremental: true
+- `system.time()` calls the function `proc.time()` before and after evaluating the expression, returning the difference between the two proc.time-call   
+  NOTE: Timing is random, for various reasons!
+- `microbenchmark::microbenchmark()` runs the expression multiple times to reduce variation
+- Code profiling to identify bottlenecks using `Rprof()` and `aprof()` 
+
+
+Simple rules I
+========================================================
+class: small-code
+**Non-essential operations** 
+- Eliminating unnecessary function calls, printing statements, plotting, or memory references
+```{r,eval=T}
+IQ1<-function(N){
+  for (j in 1:N) { N/(1+N) }
+}
+IQ2<-function(N){
+  for (j in 1:N) { (((N/(1+N)))) }
+}
+system.time(IQ1(100000))
+system.time(IQ2(100000))
+identical(IQ1(100000),IQ2(100000))
+```
+
+Simple rules II
+========================================================
+class: small-code
+**Memoization** 
+- Store the results of expensive function calls that are used repeatedly
+```{r,eval=T}
+foo1 <- function(d,R){
+  results <- array(NA, dim = c(R,ncol(d)))
+  for(i in 1:R){
+    ind <- sample(seq(nrow(d)), replace=T)
+    results[i,] <- apply(d[ind,],2,function(x) mean(x)-mean(d))
+  }
+}
+foo2 <- function(d,R,avg=mean(d)){ 
+  results <- array(NA, dim = c(R,ncol(d)))
+  for(i in 1:R){
+    ind <- sample(seq(nrow(d)), replace=T)
+    results[i,] <- apply(d[ind,],2,function(x) mean(x)-avg)
+  }
+}
+```
+
+Simple rules III
+========================================================
+class: small-code
+**Memoization**
+```{r,eval=T}
+require(microbenchmark)
+d <- matrix(100*runif(100),nrow=10)
+R <- 10
+microbenchmark(foo1(d,R),
+               foo2(d,R,avg=mean(d)),
+               times=5)
+```
+Speed-up factor = 1.5
+
+Simple rules IV
+========================================================
+class: small-code
+**Pre-allocate-and-fill operation when growing data**
+- Code profiling
+```{r,eval=T}
+foo <- function(N){
+             preallocate<-numeric(N)
+             grow<-NULL
+              for(i in 1:N){
+                  preallocate[i]<-N/(i+1)
+                  grow<-c(grow,N/(i+1))
+                 }
+            }
+dump("foo",file="foo.R")
+source("foo.R")
+tmp <- tempfile() # create file in getwd() to save profiler output
+Rprof(tmp,line.profiling=TRUE) # start profiling
+foo(5e4)
+Rprof(append=FALSE) # stop profiling
+```
+
+Simple rules V
+========================================================
+class: small-code
+**Pre-allocate-and-fill operation when growing data**
+- Code profiling
+```{r,eval=T}
+require(aprof)
+fooaprof <- aprof("foo.R",tmp)
+# summary(fooaprof) # gives projections of potential code optimization gains
+plot(fooaprof) # visualize bottlenecks in smaller programs
+profileplot(fooaprof)
+```
+- Further reading: http://marcodvisser.github.io/aprof/
+
+Simple rules VI
+====================================
+- Code profiling
+
+`plot(fooaprof)`       | `profileplot(fooaprof)` 
+---------------------- | ------------- 
+![](fooaprof_plot.png) | ![](fooaprof_profileplot.png)
+
+
+Simple rules VII
+========================================================
+class: small-code
+**Pre-allocate-and-fill operation when growing data**
+- Identify which function is causing the bottleneck
+```{r,eval=T}
+targetedSummary(fooaprof,target=7,findParent=TRUE)
+```
+- A call to "c" ("combine" function) in line 7, takes most time.
+
+Simple rules VIII
+========================================================
+class: small-code
+**Vectorization**
+- Use vectorized functions in R (instead of loops). They are pre-implemented in a lower-level compiled language, e.g. C.
+```{r,eval=T}
+foo3 <- function(d,R,avg=mean(d)){
+  results <- array(NA, dim = c(R,ncol(d)))
+  for(i in 1:R){
+    ind <- sample(seq(nrow(d)), replace=T)
+    results[i,] <- colMeans(d[ind,])-avg
+  }
+}
+microbenchmark(foo2(d,R,avg=mean(d)),
+               foo3(d,R,avg=mean(d)),
+               times=5)
+```
+Speed-up factor = 4.3  
+
+Simple rules IX
+========================================================
+class: small-code
+**Dispatch overhead**
+- Provide custom functions or use lower-level functions that avoids too much pre-checking
+```{r,eval=T}
+n <- 1000 ; p <- 2
+X <- matrix(rnorm(n * p), n, p) # no intercept!
+y <- rnorm(n)
+microbenchmark(lm(y~X-1),lm.fit(X,y))
+```
+Speed-up factor = 4.6  
+
+
+Simple rules X
+========================================================
+class: small-code
+**Dispatch overhead**
+- NOTE: that custom and lower-level functions should be used cautiously as they provide speed at the cost of requiring much stricter compliance to input rules
+```{r,eval=T}
+avg <- function(x,...){
+  sum(x,...)/length(x)
+}
+x <- c(1, 2, NA)
+DefaultMean <- mean(x, na.rm=TRUE)
+CustomMean <- avg(x, na.rm=TRUE)
+identical(DefaultMean,CustomMean)
+```
+
+
+Sophisticated methods
+========================================================
+- Parallelization
+  + dividing calculations into smaller problems and solves these simultaneously, using multiple computing elements  
+    e.g. single multi-cored machines or "distributed computing" on clusters of workstations connected via a network
+  + several R-packages available, e.g. `parallel`, `multicore`, `snow`,...  
+- Store large databases outside R
+  + R loads data into memory by default
+  + use databases stored outside R, accessing these in R using R-packages, e.g. `ff`, or 
+  + use more memory-efficient algorithms.
+
+
+Sophisticated methods
+========================================================
+- Using more efficient algorithms
+- Calling low-level languages, e.g. C++ 
+
+[The paper Visser et al. (2015)] (https://github.com/MarcoDVisser/SpeedUpR/blob/master/Paper/Visser_etal_2015PlosComp.pdf)  
+[Supporting Material from Visser et al. (2015)] (https://github.com/MarcoDVisser/SpeedUpR/blob/master/Paper/S1_Text.pdf)
+
+
+
